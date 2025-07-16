@@ -96,6 +96,26 @@ export function CandidateManagement() {
       image_public_id: formData.image_public_id,
     }
 
+   const {
+  data: userData,
+  error: userError
+} = await supabase.auth.getUser()
+
+console.log("Current user:", userData?.user)
+
+if (!userData?.user) {
+  console.error("User is not authenticated!")
+  toast({
+    title: "Unauthorized",
+    description: "You must be signed in to add a candidate.",
+    variant: "destructive"
+  })
+  setLoading(false)
+  return
+}
+
+
+
     // Insert candidate into Supabase
     const { data, error } = await supabase
       .from("candidates")
