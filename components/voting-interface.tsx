@@ -1,231 +1,239 @@
 "use client"
-import { useState, useEffect } from "react"
-import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
-import { Label } from "@/components/ui/label"
-import { CheckCircle, Loader2, XCircle } from "lucide-react"
-import Image from "next/image"
-import { supabaseOperations } from "@/lib/supabase"
-import { authService, type User } from "@/lib/auth"
-import { useToast } from "@/hooks/use-toast"
-import { Skeleton } from "@/components/ui/skeleton"
+
+import { useState } from "react"
 import { useRouter } from "next/navigation"
+import Link from "next/link"
+import { ArrowLeft, CheckCircle, Loader2 } from "lucide-react"
+import { createClientComponentClient } from "@supabase/auth-helpers-nextjs"
 
-interface Candidate {
-  id: string
-  name: string
-  department: string
-  image_url?: string
-  post_id: string
-}
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
+import { Badge } from "@/components/ui/badge"
+import { Alert, AlertDescription } from "@/components/ui/alert"
 
-interface Post {
-  id: string
-  title: string
-  description: string
-  election_id: string
-}
+import { supabaseOperations } from "@/lib/supabase"
+import type { User } from "@/lib/auth"
+import type { PostWithRelations, Candidate } from "@/app/vote/[postId]/page" // Import types from the page
 
 interface VotingInterfaceProps {
-  postId: string
+  post: PostWithRelations
+  user: User
 }
 
-export function VotingInterface({ postId }: VotingInterfaceProps) {
-  const [post, setPost] = useState<Post | null>(null)
-  const [candidates, setCandidates] = useState<Candidate[]>([])
-  const [selectedCandidate, setSelectedCandidate] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [submitting, setSubmitting] = useState(false)
-  const [voteStatus, setVoteStatus] = useState<"idle" | "success" | "error">("idle")
-  const [currentUser, setCurrentUser] = useState<User | null>(null)
-  const [hasVoted, setHasVoted] = useState(false)
-  const { toast } = useToast()
+export function VotingInterface({ post, user }: VotingInterfaceProps) {
+  const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState("")
+  const [showConfirmation, setShowConfirmation] = useState(false)
+  const [voteSuccessful, setVoteSuccessful] = useState(false)
   const router = useRouter()
 
-  useEffect(() => {
-    const user = authService.getCurrentUser()
-    setCurrentUser(user)
+  const handleVoteSubmit = async () => {
+    if (!selectedCandidateId) return
 
-    const fetchData = async () => {
-      setLoading(true)
-      try {
-        // Fetch the specific post
-        const allPosts = await supabaseOperations.getPosts("") // Fetch all posts to find the specific one
-        const currentPost = allPosts.find((p: Post) => p.id === postId)
-        setPost(currentPost || null)
+    setIsLoading(true)
+    setError("")
 
-        // Fetch candidates for this post
-        const candidatesData = await supabaseOperations.getCandidates([postId])
-        setCandidates(candidatesData || [])
-
-        // Check if user has already voted for this post
-        if (user) {
-          const userVotes = await supabaseOperations.getUserVotes(user.id)
-          const votedForThisPost = userVotes.some((vote: any) => vote.post_id === postId)
-          setHasVoted(votedForThisPost)
-        }
-      } catch (error) {
-        console.error("Error fetching voting data:", error)
-        toast({
-          title: "Error",
-          description: "Failed to load voting information.",
-          variant: "destructive",
-        })
-      } finally {
-        setLoading(false)
-      }
-    }
-
-    fetchData()
-  }, [postId, currentUser?.id])
-
-  const handleSubmitVote = async () => {
-    if (!selectedCandidate || !currentUser || !post) {
-      toast({
-        title: "Error",
-        description: "Please select a candidate and ensure you are logged in.",
-        variant: "destructive",
-      })
-      return
-    }
-
-    setSubmitting(true)
     try {
+      // **SOLUTION PART 1: Proactive "Just-in-Time" Check**
+      // Perform one final check right before submitting to prevent race conditions.
+      const supabase = createClientComponentClient()
+      const { data: voteCheck } = await supabase
+        .from("votes")
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("post_id", post.id)
+        .maybeSingle()
+
+      if (voteCheck) {
+        // If a vote exists now, it means it was cast in another tab or via a double-click.
+        // Show a friendly message and update the UI to the success state.
+        setError("It looks like you've already voted for this position.")
+        setVoteSuccessful(true) // Treat this as a success, as the vote is in.
+        return;
+      }
+
+      // If the check passes, proceed to submit the vote.
       await supabaseOperations.submitVote({
-        user_id: currentUser.id,
         post_id: post.id,
-        candidate_id: selectedCandidate,
+        candidate_id: selectedCandidateId,
+        user_id: user.id,
       })
-      setVoteStatus("success")
-      setHasVoted(true) // Update state to reflect that the user has voted
-      toast({
-        title: "Vote Cast!",
-        description: "Your vote has been successfully recorded.",
-        variant: "default",
-      })
-    } catch (error) {
-      console.error("Error submitting vote:", error)
-      setVoteStatus("error")
-      toast({
-        title: "Error",
-        description: "Failed to submit your vote. Please try again.",
-        variant: "destructive",
-      })
+
+      // Update local storage to immediately reflect the vote on the dashboard
+      const userVotes = JSON.parse(localStorage.getItem("userVotes") || "{}")
+      userVotes[post.id] = { candidate_id: selectedCandidateId }
+      localStorage.setItem("userVotes", JSON.stringify(userVotes))
+
+      // Set state to show the final success message
+      setVoteSuccessful(true)
+
+    } catch (err: any) {
+      console.error("Vote submission error:", err)
+      // **SOLUTION PART 2: Graceful Error Handling**
+      // Specifically catch the "duplicate key" error from the database.
+      if (err.code === '23505') { // This is the PostgreSQL code for unique_violation
+          setError("Your vote has already been recorded for this position.")
+          setVoteSuccessful(true); // Since the vote exists, we can consider this a "success"
+      } else {
+          setError(err.message || "An unexpected error occurred during vote submission.")
+      }
     } finally {
-      setSubmitting(false)
+        // We only set loading to false if an error occurred that wasn't a duplicate vote.
+        // If it was a duplicate or successful, the component will unmount or show the success screen.
+        if (!voteSuccessful) {
+            setIsLoading(false)
+        }
     }
   }
 
-  if (loading) {
+  const selectedCandidateData = post.candidates.find((c) => c.id === selectedCandidateId)
+
+  // Final success screen after voting
+  if (voteSuccessful) {
+      return (
+          <div className="min-h-screen bg-gray-50 py-8 flex items-center justify-center">
+              <Card className="w-full max-w-md text-center p-6">
+                  <CheckCircle className="h-16 w-16 text-green-500 mx-auto mb-4" />
+                  <CardTitle className="text-2xl font-bold mb-2">Vote Recorded!</CardTitle>
+                  <CardDescription className="text-gray-600 mb-6">
+                      Your vote for the "{post.title}" position has been successfully recorded.
+                  </CardDescription>
+                  <Button onClick={() => router.push('/dashboard')}>
+                      Return to Dashboard
+                  </Button>
+              </Card>
+          </div>
+      )
+  }
+
+  // Confirmation screen
+  if (showConfirmation && selectedCandidateData) {
     return (
-      <Card className="w-full max-w-3xl mx-auto">
-        <CardHeader className="text-center">
-          <Skeleton className="h-8 w-3/4 mx-auto mb-2" />
-          <Skeleton className="h-4 w-1/2 mx-auto" />
-        </CardHeader>
-        <CardContent className="space-y-6">
-          <Skeleton className="h-48 w-full" />
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {[1, 2, 3, 4].map((i) => (
-              <Skeleton key={i} className="h-24 w-full" />
+      <div className="min-h-screen bg-gray-50 py-8 flex items-center justify-center">
+        <div className="max-w-2xl mx-auto px-4 w-full">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-center">Confirm Your Vote</CardTitle>
+              <CardDescription className="text-center">Please review your selection before submitting.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="text-center">
+                <h3 className="text-lg font-semibold mb-2">Position: {post.title}</h3>
+                <div className="flex items-center justify-center space-x-4 p-4 bg-blue-50 rounded-lg">
+                  <Avatar className="h-16 w-16">
+                    <AvatarImage src={selectedCandidateData.image_url || "/placeholder.svg"} />
+                    <AvatarFallback>
+                      {selectedCandidateData.name.split(" ").map((n) => n[0]).join("")}
+                    </AvatarFallback>
+                  </Avatar>
+                  <div className="text-left">
+                    <p className="font-semibold text-lg">{selectedCandidateData.name}</p>
+                    {selectedCandidateData.department && (
+                      <p className="text-gray-600">{selectedCandidateData.department}</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <Alert>
+                <CheckCircle className="h-4 w-4" />
+                <AlertDescription>
+                  <strong>Important:</strong> Once you submit your vote, it cannot be changed.
+                </AlertDescription>
+              </Alert>
+
+              {error && (
+                <Alert variant="destructive">
+                  <AlertDescription>{error}</AlertDescription>
+                </Alert>
+              )}
+
+              <div className="flex space-x-4">
+                <Button
+                  variant="outline"
+                  onClick={() => setShowConfirmation(false)}
+                  className="flex-1"
+                  disabled={isLoading}
+                >
+                  Go Back & Change
+                </Button>
+                <Button onClick={handleVoteSubmit} className="flex-1" disabled={isLoading}>
+                  {isLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Submit Final Vote
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    )
+  }
+
+  // Main selection screen
+  return (
+    <div className="min-h-screen bg-gray-50 py-8">
+      <div className="max-w-4xl mx-auto px-4">
+        <div className="mb-6">
+          <Link href="/dashboard">
+            <Button variant="ghost" className="mb-4">
+              <ArrowLeft className="mr-2 h-4 w-4" />
+              Back to Dashboard
+            </Button>
+          </Link>
+
+          <div className="text-center mb-8">
+            <h1 className="text-3xl font-bold text-gray-900 mb-2">{post.title}</h1>
+            <p className="text-gray-600 mb-4">{post.description}</p>
+            {post.elections && (
+              <Badge variant="secondary" className="text-sm">
+                {post.elections.title}
+              </Badge>
+            )}
+          </div>
+        </div>
+
+        <div className="mb-8">
+          <h2 className="text-xl font-semibold mb-4">Select Your Candidate</h2>
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {post.candidates.map((candidate) => (
+              <Card
+                key={candidate.id}
+                className={`cursor-pointer transition-all hover:shadow-md ${
+                  selectedCandidateId === candidate.id ? "ring-2 ring-blue-500 bg-blue-50" : "hover:border-gray-300"
+                }`}
+                onClick={() => setSelectedCandidateId(candidate.id)}
+              >
+                <CardContent className="p-6">
+                  <div className="flex items-start space-x-4">
+                    <Avatar className="h-16 w-16">
+                      <AvatarImage src={candidate.image_url || "/placeholder.svg"} />
+                      <AvatarFallback>
+                        {candidate.name.split(" ").map((n) => n[0]).join("")}
+                      </AvatarFallback>
+                    </Avatar>
+                    <div className="flex-1">
+                      <div className="flex items-center justify-between mb-2">
+                        <h3 className="font-semibold text-lg">{candidate.name}</h3>
+                        {selectedCandidateId === candidate.id && <CheckCircle className="h-5 w-5 text-blue-600" />}
+                      </div>
+                      {candidate.department && <p className="text-gray-600 mb-2">{candidate.department}</p>}
+                      {candidate.bio && <p className="text-sm text-gray-700 line-clamp-3">{candidate.bio}</p>}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
             ))}
           </div>
-        </CardContent>
-        <CardFooter className="flex justify-center">
-          <Skeleton className="h-10 w-32" />
-        </CardFooter>
-      </Card>
-    )
-  }
+        </div>
 
-  if (!currentUser) {
-    return (
-      <Card className="w-full max-w-md mx-auto text-center p-6">
-        <XCircle className="h-12 w-12 text-red-500 mx-auto mb-4" />
-        <CardTitle className="text-2xl font-bold mb-2">Access Denied</CardTitle>
-        <CardDescription className="text-gray-600 mb-4">
-          You must be logged in to cast your vote. Please sign in to continue.
-        </CardDescription>
-        <Button onClick={() => router.push("/")}>Go to Login</Button>
-      </Card>
-    )
-  }
-
-  if (hasVoted) {
-    return (
-      <Card className="w-full max-w-md mx-auto text-center p-6">
-        <CheckCircle className="h-12 w-12 text-emerald-500 mx-auto mb-4" />
-        <CardTitle className="text-2xl font-bold mb-2">Vote Already Cast</CardTitle>
-        <CardDescription className="text-gray-600 mb-4">
-          You have already cast your vote for the &quot;{post?.title}&quot; position.
-        </CardDescription>
-        <Button onClick={() => router.push("/dashboard")}>Return to Dashboard</Button>
-      </Card>
-    )
-  }
-
-  if (!post) {
-    return (
-      <Card className="w-full max-w-md mx-auto text-center p-6">
-        <XCircle className="h-12 w-12 text-red-500 mx-auto mb-4" />
-        <CardTitle className="text-2xl font-bold mb-2">Post Not Found</CardTitle>
-        <CardDescription className="text-gray-600 mb-4">
-          The voting post you are looking for does not exist or is no longer active.
-        </CardDescription>
-        <Button onClick={() => router.push("/dashboard")}>Return to Dashboard</Button>
-      </Card>
-    )
-  }
-
-  return (
-    <Card className="w-full max-w-3xl mx-auto">
-      <CardHeader className="text-center pb-4">
-        <CardTitle className="text-3xl font-bold text-gray-800">{post.title}</CardTitle>
-        <CardDescription className="text-gray-600">{post.description}</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-6 px-8">
-        <RadioGroup
-          onValueChange={setSelectedCandidate}
-          value={selectedCandidate || ""}
-          className="grid grid-cols-1 md:grid-cols-2 gap-4"
-        >
-          {candidates.map((candidate) => (
-            <Label
-              key={candidate.id}
-              htmlFor={candidate.id}
-              className="flex flex-col items-center justify-between rounded-xl border-2 border-gray-200 bg-white p-4 text-card-foreground hover:bg-gray-50 cursor-pointer transition-all duration-200 has-[[data-state=checked]]:border-emerald-500 has-[[data-state=checked]]:ring-2 has-[[data-state=checked]]:ring-emerald-500"
-            >
-              <RadioGroupItem id={candidate.id} value={candidate.id} className="sr-only" />
-              {candidate.image_url && (
-                <div className="relative w-24 h-24 mb-3 rounded-full overflow-hidden border border-gray-200">
-                  <Image
-                    src={candidate.image_url || "/placeholder.svg"}
-                    alt={candidate.name}
-                    fill
-                    objectFit="cover"
-                    className="rounded-full"
-                  />
-                </div>
-              )}
-              <div className="text-center">
-                <h3 className="text-lg font-semibold text-gray-800">{candidate.name}</h3>
-                <p className="text-sm text-gray-500">{candidate.department}</p>
-              </div>
-            </Label>
-          ))}
-        </RadioGroup>
-      </CardContent>
-      <CardFooter className="flex justify-center px-8 pb-8">
-        <Button
-          onClick={handleSubmitVote}
-          disabled={!selectedCandidate || submitting || hasVoted}
-          className="w-full md:w-auto px-8 h-12 bg-green-gradient hover:shadow-lg hover:shadow-emerald-500/25 text-white font-semibold rounded-xl transition-all duration-300 transform hover:scale-[1.02]"
-        >
-          {submitting && <Loader2 className="mr-2 h-5 w-5 animate-spin" />}
-          {submitting ? "Submitting Vote..." : "Cast My Vote"}
-        </Button>
-      </CardFooter>
-    </Card>
+        <div className="text-center mt-8">
+          <Button onClick={() => setShowConfirmation(true)} disabled={!selectedCandidateId} size="lg" className="px-8">
+            Continue to Confirmation
+          </Button>
+        </div>
+      </div>
+    </div>
   )
 }

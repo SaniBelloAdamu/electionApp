@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Clock, AlertTriangle, Zap } from "lucide-react"
+import { Skeleton } from "./ui/skeleton"
 
 interface ElectionCountdownProps {
   endTime: string
@@ -42,6 +43,7 @@ export function ElectionCountdown({ endTime, title }: ElectionCountdownProps) {
     calculateTimeLeft()
     const timer = setInterval(calculateTimeLeft, 1000)
 
+    // Clear interval on component unmount
     return () => clearInterval(timer)
   }, [endTime])
 
